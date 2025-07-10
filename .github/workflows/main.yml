@@ -74,8 +74,9 @@ jobs:
       if: github.event_name == 'workflow_dispatch' && steps.set-inputs.outputs.process_archive == 'true'
       run: |
         ARCHIVE_URL="${{ steps.set-inputs.outputs.archive_url }}"
-        GLITCH_COUNT="${{ steps.event.inputs.glitch_count }}" # workflow_dispatchの直接入力を使用
-        GLITCH_STRENGTH="${{ steps.event.inputs.glitch_strength }}" # workflow_dispatchの直接入力を使用
+        # ここを修正: workflow_dispatchの直接入力ではなく、set-inputsステップの出力を使用
+        GLITCH_COUNT="${{ steps.set-inputs.outputs.glitch_count }}"
+        GLITCH_STRENGTH="${{ steps.set-inputs.outputs.glitch_strength }}"
 
         echo "Processing from archive URL: $ARCHIVE_URL"
         echo "Glitch Count: $GLITCH_COUNT"
@@ -112,7 +113,7 @@ jobs:
         for file in ${{ steps.changed-videos.outputs.changed_files }}; do
           echo "Processing $file..."
           INPUT_DIR=$(dirname "$file")
-          INPUT_FILENAME=$(basename "$file")
+          INPUT_FILENAME=$(basename "$file)
           FILENAME_NO_EXT="${INPUT_FILENAME%.*}"
           OUTPUT_FILENAME="${FILENAME_NO_EXT}_datamoshed.mp4"
           OUTPUT_PATH="${INPUT_DIR}/${OUTPUT_FILENAME}"
