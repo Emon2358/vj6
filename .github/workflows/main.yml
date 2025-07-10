@@ -1,0 +1,202 @@
+name: Datamosh Video and Create Release
+
+on:
+  push:
+    paths:
+      - 'videos/*.mp4'
+      - 'videos/*.mov'
+  workflow_dispatch:
+    inputs:
+      video_file_path:
+        description: '処理する動画ファイルへのパス (例: videos/input.mp4)'
+        required: false # アーカイブ処理の場合は不要
+        default: ''
+      glitch_count:
+        description: 'グリッチの回数'
+        required: false
+        default: '15'
+      glitch_strength:
+        description: 'グリッチの強度 (バイト数)'
+        required: false
+        default: '10000'
+      process_archive_url: # アーカイブURLからの処理をトリガーする新しい入力
+        description: 'アーカイブURLからランダムな動画を処理しますか？ (true/false)'
+        required: false
+        type: boolean
+        default: false
+      archive_url: # 処理するアーカイブURL
+        description: '処理するアーカイブURL (process_archive_urlがtrueの場合に必要)'
+        required: false
+        default: 'https://archive.org/download/09-sel-protocol' # デフォルト値
+
+permissions: # ワークフロー全体の権限を設定
+  contents: write # リリース作成とアセットアップロードのために必要
+
+jobs:
+  datamosh:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: Install FFmpeg and Python dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+        # PythonスクリプトでBeautifulSoupとrequestsを使用するためインストール
+        pip install requests beautifulsoup4
+
+    - name: Set input variables for processing
+      id: set-inputs
+      run: |
+        # workflow_dispatchからの入力を取得し、デフォルト値を設定
+        INPUT_FILE="${{ github.event.inputs.video_file_path }}"
+        GLITCH_COUNT="${{ github.event.inputs.glitch_count || '15' }}"
+        GLITCH_STRENGTH="${{ github.event.inputs.glitch_strength || '10000' }}"
+        PROCESS_ARCHIVE="${{ github.event.inputs.process_archive_url }}"
+        ARCHIVE_URL="${{ github.event.inputs.archive_url || 'https://archive.org/download/09-sel-protocol' }}"
+
+        echo "input_file=$INPUT_FILE" >> $GITHUB_OUTPUT
+        echo "glitch_count=$GLITCH_COUNT" >> $GITHUB_OUTPUT
+        echo "glitch_strength=$GLITCH_STRENGTH" >> $GITHUB_OUTPUT
+        echo "process_archive=$PROCESS_ARCHIVE" >> $GITHUB_OUTPUT
+        echo "archive_url=$ARCHIVE_URL" >> $GITHUB_OUTPUT
+
+    - name: Run datamoshing (Archive URL processing)
+      id: run-archive-datamosh
+      # workflow_dispatchイベントで、かつprocess_archive_urlがtrueの場合に実行
+      if: github.event_name == 'workflow_dispatch' && steps.set-inputs.outputs.process_archive == 'true'
+      run: |
+        ARCHIVE_URL="${{ steps.set-inputs.outputs.archive_url }}"
+        GLITCH_COUNT="${{ steps.event.inputs.glitch_count }}" # workflow_dispatchの直接入力を使用
+        GLITCH_STRENGTH="${{ steps.event.inputs.glitch_strength }}" # workflow_dispatchの直接入力を使用
+
+        echo "Processing from archive URL: $ARCHIVE_URL"
+        echo "Glitch Count: $GLITCH_COUNT"
+        echo "Glitch Strength: $GLITCH_STRENGTH"
+
+        # Pythonスクリプトの新しいモードを呼び出し、出力パスをキャプチャ
+        # Pythonスクリプトは成功した場合、最終的なファイルパスを標準出力に出力する想定
+        OUTPUT_FILE_PATH=$(python datamosh.py --archive "$ARCHIVE_URL" "$GLITCH_COUNT" "$GLITCH_STRENGTH")
+        
+        if [ -f "$OUTPUT_FILE_PATH" ]; then
+          echo "Successfully created $OUTPUT_FILE_PATH"
+          echo "output_path=$OUTPUT_FILE_PATH" >> $GITHUB_OUTPUT # 次のステップで利用するため出力
+          echo "output_filename=$(basename "$OUTPUT_FILE_PATH")" >> $GITHUB_OUTPUT
+        else
+          echo "Failed to create datamoshed video from archive URL."
+          exit 1
+        fi
+
+    - name: Get changed video files (for push event)
+      id: changed-videos
+      # pushイベントの場合のみ実行
+      if: github.event_name == 'push'
+      uses: tj-actions/changed-files@v40
+      with:
+        files: |
+          videos/*.mp4
+          videos/*.mov
+
+    - name: Run datamoshing (Push event)
+      # pushイベントで、かつ変更された動画ファイルがある場合に実行
+      if: github.event_name == 'push' && steps.changed-videos.outputs.any_changed == 'true'
+      run: |
+        echo "Found changed video files: ${{ steps.changed-videos.outputs.changed_files }}"
+        for file in ${{ steps.changed-videos.outputs.changed_files }}; do
+          echo "Processing $file..."
+          INPUT_DIR=$(dirname "$file")
+          INPUT_FILENAME=$(basename "$file")
+          FILENAME_NO_EXT="${INPUT_FILENAME%.*}"
+          OUTPUT_FILENAME="${FILENAME_NO_EXT}_datamoshed.mp4"
+          OUTPUT_PATH="${INPUT_DIR}/${OUTPUT_FILENAME}"
+
+          # データモッシングスクリプトを実行
+          python datamosh.py "$file" "$OUTPUT_PATH" "${{ steps.set-inputs.outputs.glitch_count }}" "${{ steps.set-inputs.outputs.glitch_strength }}"
+          
+          if [ -f "$OUTPUT_PATH" ]; then
+            echo "Successfully created $OUTPUT_PATH"
+          else
+            echo "Failed to create $OUTPUT_PATH"
+            exit 1
+          fi
+        done
+
+    - name: Run datamoshing (Manual workflow_dispatch - local file)
+      id: run-manual-datamosh-local
+      # workflow_dispatchイベントで、かつprocess_archive_urlがfalseの場合に実行
+      if: github.event_name == 'workflow_dispatch' && steps.set-inputs.outputs.process_archive == 'false'
+      run: |
+        INPUT_FILE="${{ steps.set-inputs.outputs.input_file }}"
+        GLITCH_COUNT="${{ steps.set-inputs.outputs.glitch_count }}"
+        GLITCH_STRENGTH="${{ steps.set-inputs.outputs.glitch_strength }}"
+
+        if [[ -z "$INPUT_FILE" ]]; then
+          echo "エラー: 'video_file_path' が指定されていません。"
+          exit 1
+        fi
+        if [[ ! -f "$INPUT_FILE" ]]; then
+          echo "エラー: 指定されたファイル '$INPUT_FILE' が見つかりません。"
+          exit 1
+        fi
+
+        INPUT_DIR=$(dirname "$INPUT_FILE")
+        INPUT_FILENAME=$(basename "$INPUT_FILE")
+        FILENAME_NO_EXT="${INPUT_FILENAME%.*}"
+        OUTPUT_FILENAME="${FILENAME_NO_EXT}_datamoshed.mp4"
+        OUTPUT_PATH="${INPUT_DIR}/${OUTPUT_FILENAME}"
+
+        echo "Processing $INPUT_FILE..."
+        echo "Output will be saved to $OUTPUT_PATH"
+        echo "Glitch Count: $GLITCH_COUNT"
+        echo "Glitch Strength: $GLITCH_STRENGTH"
+
+        python datamosh.py "$INPUT_FILE" "$OUTPUT_PATH" "$GLITCH_COUNT" "$GLITCH_STRENGTH"
+
+        if [ -f "$OUTPUT_PATH" ]; then
+          echo "Successfully created $OUTPUT_PATH"
+          echo "output_path=$OUTPUT_PATH" >> $GITHUB_OUTPUT # 次のステップで利用するため出力
+          echo "output_filename=$OUTPUT_FILENAME" >> $GITHUB_OUTPUT
+        else
+          echo "Failed to create $OUTPUT_PATH"
+          exit 1
+        fi
+
+    - name: Create Release and Upload Asset
+      id: create_release_and_upload
+      # 以下のいずれかの条件が満たされた場合に実行:
+      # 1. pushイベントで変更された動画ファイルがあった場合
+      # 2. workflow_dispatchイベントでアーカイブ処理が成功した場合
+      # 3. workflow_dispatchイベントでローカルファイル処理が成功した場合
+      if: (github.event_name == 'push' && steps.changed-videos.outputs.any_changed == 'true') || \
+          (github.event_name == 'workflow_dispatch' && (steps.run-archive-datamosh.outcome == 'success' || steps.run-manual-datamosh-local.outcome == 'success'))
+      uses: softprops/action-gh-release@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: datamoshed-videos-${{ github.run_number }} # ユニークなタグを生成
+        name: Datamoshed Videos ${{ github.run_number }} # リリース名
+        body: |
+          自動生成されたデータモッシュ動画。
+          
+          **トリガーイベント:** ${{ github.event_name }}
+          **処理されたファイル:** ${{ github.event_name == 'workflow_dispatch' && steps.set-inputs.outputs.process_archive == 'true' && steps.run-archive-datamosh.outputs.output_filename || '' }}
+          ${{ github.event_name == 'workflow_dispatch' && steps.set-inputs.outputs.process_archive == 'false' && steps.run-manual-datamosh-local.outputs.output_filename || '' }}
+          ${{ github.event_name == 'push' && steps.changed-videos.outputs.changed_files || '' }}
+
+        draft: false # ドラフトリリースではない
+        prerelease: false # プレリリースではない
+        files: |
+          # pushイベントの場合、videos/ディレクトリ内の_datamoshed.mp4ファイルをすべてアップロード
+          ${{ github.event_name == 'push' && 'videos/*_datamoshed.mp4' || '' }}
+          # workflow_dispatchでアーカイブ処理の場合、特定の出力ファイルのみをアップロード
+          ${{ github.event_name == 'workflow_dispatch' && steps.set-inputs.outputs.process_archive == 'true' && steps.run-archive-datamosh.outputs.output_path || '' }}
+          # workflow_dispatchでローカルファイル処理の場合、特定の出力ファイルのみをアップロード
+          ${{ github.event_name == 'workflow_dispatch' && steps.set-inputs.outputs.process_archive == 'false' && steps.run-manual-datamosh-local.outputs.output_path || '' }}
+
